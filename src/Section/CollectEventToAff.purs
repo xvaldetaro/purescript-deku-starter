@@ -23,6 +23,12 @@ import Paraglider.Operator.SwitchMap (switchMap)
 import Util.InputRow as InputRow
 import Util.Util (flexCol, subtext)
 
+docs :: String
+docs = """
+Subscribes to upstream for `ms` and aggregate emissions. Once `ms` is passed will unsubscribe to
+upstream and Push the aggregated result into the returned Aff"
+"""
+
 nut :: ∀ s m lock payload. Korok s m => Domable m lock payload
 nut = Doku.do
   nTimePush /\ nTimeEv <- bussedUncurried
@@ -49,7 +55,7 @@ nut = Doku.do
       affReturnedText emissionArr = "Aff returned: " <> show emissionArr
 
   D.div (flexCol)
-    [ subtext "-- / Subscribes to upstream for `ms` and aggregate emissions. Once `ms` is passed will unsubscribe to upstream and Push the aggregated result into the returned Aff"
+    [ subtext docs
     , InputRow.number "For how many milliseconds should we collect emissions?" "Set" onTimeClick
     , InputRow.text "Click to emit numbers" "Emit" actualPush
     , D.div_
