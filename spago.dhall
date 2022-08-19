@@ -1,7 +1,8 @@
 { sources = [ "./src/**/*.purs" ]
 , name = "deku-starter"
 , dependencies =
-  [ "arrays"
+  [ "aff"
+  , "arrays"
   , "bolson"
   , "console"
   , "control"
@@ -12,6 +13,7 @@
   , "foldable-traversable"
   , "hyrule"
   , "hyrule-paraglider"
+  , "integers"
   , "maybe"
   , "monoid-extras"
   , "ordered-collections"
@@ -20,6 +22,7 @@
   , "routing"
   , "routing-duplex"
   , "st"
+  , "strings"
   , "tuples"
   , "web-events"
   , "web-html"

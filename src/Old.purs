@@ -26,7 +26,7 @@ import Deku.Toplevel (runInBody)
 import Effect (Effect)
 import Effect.Class.Console (log)
 import FRP.Event (AnEvent, fold, fromEvent, keepLatest, toEvent)
-import Paraglider.Rx (doOnNext)
+import Paraglider.Operator.DoOnNext (doOnNext)
 import Web.Event.Event (target)
 import Web.HTML.HTMLInputElement (fromEventTarget, value)
 
