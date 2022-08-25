@@ -5,8 +5,10 @@ import Prelude
 import Control.Alt ((<|>))
 import Control.Monad.ST.Class (class MonadST, liftST)
 import Control.Monad.ST.Internal as Ref
+import Control.Monad.ST.Ref as STRef
 import Control.Plus (empty)
 import Data.Array (cons)
+import Data.Array as Array
 import Data.Compactable (compact)
 import Data.Foldable (oneOf, oneOfMap)
 import Data.FoldableWithIndex (foldrWithIndex)
@@ -17,13 +19,13 @@ import Data.Variant (Variant, inj, on)
 import Data.Variant.Internal (VariantRep(..))
 import Deku.Attribute (Attribute)
 import Deku.Control (dyn, text, text_)
-import Deku.Core (Domable, insert_, remove)
+import Deku.Core (Domable, Nut, insert_, remove)
 import Deku.DOM as D
-import Deku.Toplevel (runInBody)
+import Deku.Toplevel (runInBody, runInBody1)
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..), delay, launchAff_)
 import Effect.Class (liftEffect)
-import FRP.Event (class Filterable, AnEvent, EventIO, create, filterMap, fromEvent, keepLatest, makeEvent, mapAccum, subscribe)
+import FRP.Event (class Filterable, AnEvent, EventIO, create, filterMap, fold, fromEvent, keepLatest, makeEvent, mapAccum, subscribe)
 import Foreign (Foreign)
 import Foreign.Object (Object)
 import Hyrule.Zora (Zora)
@@ -128,6 +130,18 @@ withUnsubscribe e = makeEvent \ff -> do
     false -> o $> pure unit
     true -> liftST $ Ref.write o ro $> o
 
+memoBeh :: forall m a t r. Applicative m => MonadST t m => AnEvent m a -> a -> (AnEvent m a -> r) -> AnEvent m r
+memoBeh e a f = makeEvent \k -> do
+  { push, event } <- create
+  current <- liftST (STRef.new a)
+  let
+    writeVal v = liftST (STRef.write v current) :: m a
+    event' = makeEvent \k' -> do
+      liftST (STRef.read current) >>= k'
+      subscribe event k'
+  k (f event')
+  subscribe e (\v -> writeVal v *> push v)
+
 -- end joyride copy
 
 loadingErrorDone
@@ -155,47 +169,21 @@ loadingErrorDone_ element variant matcher = loadingErrorDone element empty varia
 
 main :: Effect Unit
 main = do
-  { event, push } :: EventIO (Variant (loading :: Unit, error :: Unit, done :: Some (username :: String, online :: Boolean, bio :: String))) <- create
-  runInBody
-    ( loadingErrorDone_ D.div (fromEvent event)
-        { loading: \_ -> text_ "Loading."
-        , error: \_ -> text_ "Error."
-        , done: \doc' -> do
-            let doc = variantEvent (toVariantsE doc')
-            D.div_
-              [ D.div_ [ text doc.username ]
-              , D.div_ [ text $ show <$> doc.online ]
-              , D.div_ [ text doc.bio ]
-              ]
-        }
+  { event: event', push } :: EventIO (Variant (loading :: Unit, error :: Unit, done :: String)) <- create
+  runInBody1
+    (
+      memoBeh (fromEvent event') (inj (Proxy :: _ "loading") unit)
+        ( \event ->
+            loadingErrorDone_ D.div event
+              { loading: \_ -> text_ "Loading."
+              , error: \_ -> text_ "Error."
+              , done: \doc' -> do
+                  let doc = fold (flip Array.snoc) doc' []
+                  D.div_ [ text $ show <$> doc ]
+              }
+        )
     )
   launchAff_ do
-    let pause = delay (Milliseconds 2000.0)
-    liftEffect $ push (inj (Proxy :: _ "loading") unit)
-    pause
-    liftEffect $ push
-      ( inj (Proxy :: _ "done")
-          ( asSome
-              { username: "Mike"
-              , online: false
-              , bio: "I move hands code come out."
-              }
-          )
-      )
-    pause
-    liftEffect $ push
-      ( inj (Proxy :: _ "done")
-          ( asSome
-              { username: "Bob"
-              }
-          )
-      )
-    pause
-    liftEffect $ push
-      ( inj (Proxy :: _ "done")
-          ( asSome
-              { online: true
-              , bio: "I stop move hands no code come out."
-              }
-          )
-      )
+    liftEffect $ push ( inj (Proxy :: _ "done") "First")
+    liftEffect $ push ( inj (Proxy :: _ "done") "Second")
+    liftEffect $ push ( inj (Proxy :: _ "done") "Third")
