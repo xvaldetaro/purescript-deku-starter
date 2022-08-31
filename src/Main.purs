@@ -2,188 +2,179 @@ module Main where
 
 import Prelude
 
+import Bolson.Core (envy)
+import Bolson.Core as Bolson
 import Control.Alt ((<|>))
-import Control.Monad.ST.Class (class MonadST, liftST)
-import Control.Monad.ST.Internal as Ref
-import Control.Monad.ST.Ref as STRef
 import Control.Plus (empty)
-import Data.Array (cons)
+import Data.Array (drop, length, mapWithIndex)
 import Data.Array as Array
-import Data.Compactable (compact)
-import Data.Foldable (oneOf, oneOfMap)
-import Data.FoldableWithIndex (foldrWithIndex)
-import Data.Maybe (Maybe(..))
-import Data.Symbol (class IsSymbol)
+import Data.Foldable (oneOfMap)
+import Data.Map (Map)
+import Data.Map as Map
+import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Traversable (traverse)
+import Data.Tuple (Tuple(..), fst)
 import Data.Tuple.Nested ((/\))
-import Data.Variant (Variant, inj, on)
-import Data.Variant.Internal (VariantRep(..))
 import Deku.Attribute (Attribute)
-import Deku.Control (dyn, text, text_)
-import Deku.Core (Domable, Nut, insert_, remove)
+import Deku.Control (dyn, text_)
+import Deku.Core (Domable, Nut, insert, insert_, remove)
 import Deku.DOM as D
-import Deku.Toplevel (runInBody, runInBody1)
+import Deku.Do (useState')
+import Deku.Do as Doku
+import Deku.Listeners (textInput)
+import Deku.Toplevel (runInBody)
 import Effect (Effect)
-import Effect.Aff (Milliseconds(..), delay, launchAff_)
-import Effect.Class (liftEffect)
-import FRP.Event (class Filterable, AnEvent, EventIO, create, filterMap, fold, fromEvent, keepLatest, makeEvent, mapAccum, subscribe)
-import Foreign (Foreign)
-import Foreign.Object (Object)
+import Effect.Random (random)
+import FRP.Event (AnEvent, ZoraEvent, filterMap, fold, fromEvent, keepLatest, mapAccum, memoize, withLast)
 import Hyrule.Zora (Zora)
-import Prim.Row as R
-import Prim.RowList as RL
-import Record (insert)
-import Type.Proxy (Proxy(..))
-import Unsafe.Coerce (unsafeCoerce)
+import Paraglider.Operator.FromEffect (fromEffect)
+import Paraglider.Operator.MemoBeh (memoBeh')
+import Paraglider.Operator.SwitchMap (switchMap)
+import Style (bangCss, btn, css, inputCss, inputText)
 
-data Some :: forall k. k -> Type
-data Some r
-
-asSome :: forall a b c. R.Union a b c => { | a } -> Some c
-asSome = unsafeCoerce
-
-toVariants :: forall r. Some r -> Array (Variant r)
-toVariants some = foldrWithIndex (\key value -> cons (toVariant (VariantRep { type: key, value }))) [] (toObjectForeign some)
-  where
-  toVariant :: VariantRep Foreign -> Variant r
-  toVariant = unsafeCoerce
-
-  toObjectForeign :: Some r -> Object Foreign
-  toObjectForeign = unsafeCoerce
-
-toVariantsE :: forall r s m. MonadST s m => AnEvent m (Some r) -> AnEvent m (Variant r)
-toVariantsE = keepLatest <<< map (oneOfMap pure <<< toVariants)
-
-class Eventable (m :: Type -> Type) (rl :: RL.RowList Type) (i :: Row Type) (o :: Row Type) | rl -> i o where
-  eventable :: Filterable (AnEvent m) => Proxy rl -> AnEvent m (Variant i) -> { | o }
-
-instance Eventable m RL.Nil () () where
-  eventable _ _ = {}
-
-instance
-  ( IsSymbol key
-  , R.Lacks key i'
-  , R.Lacks key o'
-  , R.Cons key value i' i
-  , R.Cons key (AnEvent m value) o' o
-  , Eventable m rest i' o'
-  ) =>
-  Eventable m (RL.Cons key value rest) i o where
-  eventable _ i = insert (Proxy :: _ key) (filterMap (on (Proxy :: _ key) Just (const Nothing)) i) (eventable (Proxy :: _ rest) (map shrinkVariant i))
-    where
-    shrinkVariant :: Variant i -> Variant i'
-    shrinkVariant = unsafeCoerce
-
-variantEvent :: forall m i o rl. Filterable (AnEvent m) => RL.RowToList i rl => Eventable m rl i o => AnEvent m (Variant i) -> { | o }
-variantEvent = eventable (Proxy :: _ rl)
-
--- start joyride copy
-fireAndForget
-  :: forall s m
-   . MonadST s m
-  => AnEvent m ~> AnEvent m
-fireAndForget = oneOff Just
-
-oneOff
-  :: forall s m a b
-   . MonadST s m
-  => (a -> Maybe b)
-  -> AnEvent m a
-  -> AnEvent m b
-oneOff f e = compact $ emitUntil identity
-  ( mapAccum
-      ( \a b -> case f a, b of
-          _, true -> true /\ Nothing
-          Nothing, false -> false /\ Just Nothing
-          Just x, false -> true /\ Just (Just x)
-      )
-      e
-      false
-  )
-
-emitUntil
-  :: forall s m a b
-   . MonadST s m
-  => (a -> Maybe b)
-  -> AnEvent m a
-  -> AnEvent m b
-emitUntil aToB e = makeEvent \k -> do
-  o <- subscribe (withUnsubscribe e) \{ unsubscribe, value } ->
-    case aToB value of
-      Just b -> k b
-      Nothing -> unsubscribe
-  pure o
-
-withUnsubscribe :: forall s m a. MonadST s m => AnEvent m a -> AnEvent m { unsubscribe :: m Unit, value :: a }
-withUnsubscribe e = makeEvent \ff -> do
-  let f unsubscribe value = ff { unsubscribe, value }
-  active <- liftST $ Ref.new true
-  ro <- liftST $ Ref.new (pure unit)
-  let
-    cancel = do
-      _ <- liftST $ Ref.write false active
-      join (liftST $ Ref.read ro)
-    f' = f cancel
-    callback a = do
-      whenM (liftST $ Ref.read active) (f' a)
-  o <- subscribe e callback
-  (liftST $ Ref.read active) >>= case _ of
-    false -> o $> pure unit
-    true -> liftST $ Ref.write o ro $> o
-
-memoBeh :: forall m a t r. Applicative m => MonadST t m => AnEvent m a -> a -> (AnEvent m a -> r) -> AnEvent m r
-memoBeh e a f = makeEvent \k -> do
-  { push, event } <- create
-  current <- liftST (STRef.new a)
-  let
-    writeVal v = liftST (STRef.write v current) :: m a
-    event' = makeEvent \k' -> do
-      liftST (STRef.read current) >>= k'
-      subscribe event k'
-  k (f event')
-  subscribe e (\v -> writeVal v *> push v)
-
--- end joyride copy
-
-loadingErrorDone
-  :: forall element loading error done lock payload
-   . (AnEvent Zora (Attribute element) -> Array (Domable lock payload) -> Domable lock payload)
+-- | Renders an Array of items with its original order. This function is used to display an Array of
+-- | Models that you have no control of. Say you get all the items in your list from the backend and
+-- | you just need to simply render them as they come. The items don't have any control over when
+-- | they are added or removed, it all comes from upstream.
+-- |
+-- | Accumulates diffs between `upstr`'s emissions and insert<<<render/reorder/remove items from
+-- | each diff.
+dynDiffOrdered :: ∀ element lock payload a id
+  . Ord id
+  => (AnEvent Zora (Attribute element) -> Array (Domable lock payload) -> Domable lock payload)
   -> AnEvent Zora (Attribute element)
-  -> AnEvent Zora (Variant (loading :: loading, error :: error, done :: done))
-  -> { loading :: AnEvent Zora loading -> Domable lock payload, error :: AnEvent Zora error -> Domable lock payload, done :: AnEvent Zora done -> Domable lock payload }
+  -> (a -> id)
+  -> (a -> Domable lock payload)
+  -> AnEvent Zora (Array a)
   -> Domable lock payload
-loadingErrorDone element atts variant matcher = dyn element atts $ oneOf
-  [ fireAndForget ve.loading <#> \v -> oneOf [ pure (insert_ (matcher.loading (pure v <|> ve.loading))), ve.done $> remove, ve.error $> remove ]
-  , fireAndForget ve.error <#> \v -> oneOf [ pure (insert_ (matcher.error (pure v <|> ve.error))) ]
-  , fireAndForget ve.done <#> \v -> oneOf [ pure (insert_ (matcher.done (pure v <|> ve.done))) ]
-  ]
+dynDiffOrdered elem attrs getId render upstr = dyn elem attrs dynEv
   where
-  ve = variantEvent variant
+  indexedUpstr :: ZoraEvent (Array (Tuple Int a))
+  indexedUpstr = mapWithIndex Tuple <$> upstr
 
-loadingErrorDone_
-  :: forall element loading error done lock payload
-   . (AnEvent Zora (Attribute element) -> Array (Domable lock payload) -> Domable lock payload)
-  -> AnEvent Zora (Variant (loading :: loading, error :: error, done :: done))
-  -> { loading :: AnEvent Zora loading -> Domable lock payload, error :: AnEvent Zora error -> Domable lock payload, done :: AnEvent Zora done -> Domable lock payload }
+  getId' (Tuple _ item) = getId item
+  dynEv = keepLatest $ memoize (diffAccum getId' indexedUpstr) \diffEv ->
+    let
+      mkOnSelfRemovedEv selfId = diffEv # filterMap \{removed} ->
+        if Map.member selfId removed then Just remove else Nothing
+
+      -- | need to sort otherwise insertions go in wrong order
+
+      sortedAddedEv :: ZoraEvent (Array (Tuple Int a))
+      sortedAddedEv = (\{added} -> Array.sortWith fst $ Array.fromFoldable added) <$> diffEv
+
+      itemsAddedUnfoldedEv :: ZoraEvent (Tuple Int a)
+      itemsAddedUnfoldedEv = keepLatest $ (oneOfMap pure) <$> sortedAddedEv
+
+      mkRow :: Tuple Int a -> ZoraEvent (Bolson.Child _ _ Zora _)
+      mkRow (Tuple i item) = (pure $ insert i $ render item)
+        <|> mkOnSelfRemovedEv (getId item)
+    in
+    mkRow <$> itemsAddedUnfoldedEv
+
+-- | Same as dynDiffOrdered, but always adds new elements to the end of the list
+dynDiffUnordered :: ∀ element lock payload a id
+  . Ord id
+  => (AnEvent Zora (Attribute element) -> Array (Domable lock payload) -> Domable lock payload)
+  -> AnEvent Zora (Attribute element)
+  -> (a -> id)
+  -> (a -> Domable lock payload)
+  -> AnEvent Zora (Array a)
   -> Domable lock payload
-loadingErrorDone_ element variant matcher = loadingErrorDone element empty variant matcher
+dynDiffUnordered elem attrs getId render upstr = dyn elem attrs dynEv
+  where
+  dynEv = keepLatest $ memoize (diffAccum getId upstr) \diffEv ->
+    let
+      mkOnSelfRemovedEv selfId = diffEv # filterMap \{removed} ->
+        if Map.member selfId removed then Just remove else Nothing
+
+      itemsAddedUnfoldedEv = switchMap (\{added} -> oneOfMap pure added) diffEv
+
+      mkRow item = (pure $ insert_  $ render item) <|> mkOnSelfRemovedEv (getId item)
+    in
+    mkRow <$> itemsAddedUnfoldedEv
+
+-- | Same as dynDiffOrdered, but assumes that `upstr`'s emission is an Array where elements are only
+-- | added, never removed. Because of that it doesn't use any sorting or Map
+dynDiffOnlyAddition :: ∀ element lock payload a
+  . (AnEvent Zora (Attribute element) -> Array (Domable lock payload) -> Domable lock payload)
+  -> AnEvent Zora (Attribute element)
+  -> (a -> Domable lock payload)
+  -> AnEvent Zora (Array a)
+  -> Domable lock payload
+dynDiffOnlyAddition elem attrs render upstr = dyn elem attrs rowsEv
+  where
+  goNewItems {last, now} =
+    let
+      last' = fromMaybe [] last
+    in
+      if length last' < length now then Just (drop (length last') now) else Nothing
+
+  newItemsDiffEv :: ZoraEvent (Array a)
+  newItemsDiffEv = filterMap goNewItems (withLast $ upstr)
+
+  newItemsUnfoldedEv :: ZoraEvent a
+  newItemsUnfoldedEv = keepLatest $ (oneOfMap pure) <$> newItemsDiffEv
+
+  mkRow :: a -> ZoraEvent (Bolson.Child _ _ Zora _)
+  mkRow item = (pure $ insert_ $ render item)
+
+  rowsEv :: ZoraEvent (ZoraEvent (Bolson.Child _ _ Zora _))
+  rowsEv = mkRow <$> newItemsUnfoldedEv
+
+diffAccum :: ∀ a id
+  . Ord id
+  => (a -> id)
+  -> ZoraEvent (Array a)
+  -> ZoraEvent { added :: Map id a, removed :: Map id a, all :: Map id a }
+diffAccum getId upst = mapAccum go upst Map.empty
+  where
+  go incomingArr accDict =
+    let
+        incomingDict = Map.fromFoldable $ (\item -> Tuple (getId item) item) <$> incomingArr
+        newItemsDict = Map.difference incomingDict accDict
+        removedItemsDict = Map.difference accDict incomingDict
+    in Tuple
+      incomingDict
+      { added: newItemsDict
+      , removed: removedItemsDict
+      , all: incomingDict
+      }
+
+nut :: Nut
+nut = Doku.do
+  p /\ e' <- useState'
+  pText /\ textEv <- useState'
+  let
+    e = e' <|> pure {id: "", name: "", add: false}
+    go :: String -> Effect (Tuple String ({id:: String, name::String}))
+    go name = random <#> \r -> Tuple (show r) {id: (show r), name}
+
+    go1 = traverse go ["a", "h", "m", "p", "w"]
+
+  initial <- envy <<< (memoBeh' $ fromEvent $ fromEffect $ go1)
+
+
+  let
+    getId item = item.id
+    foldGo {name, id, add} = if add then Map.insert id {name, id} else Map.delete id
+    dictEv = initial # switchMap \i -> fold foldGo e (Map.fromFoldable i)
+    arrEv =  Array.sortWith (_.name) <<< Array.fromFoldable <$> dictEv
+    render {name, id} = D.div (bangCss "text-white")
+      [ text_ $ "Name: " <> name <> " id:" <> id
+      , btn "Remove" (css "bg-red-800") (pure $ p {id, name: "", add:false})
+      ]
+
+  D.div (bangCss "bg-gray-700 h-screen")
+    [ inputText ((textInput $ pure pText) <|> bangCss inputCss)
+    , btn "Add new" "" ((\t -> random >>= \r -> p {name: t, id: show r, add: true}) <$> textEv)
+    , D.div (bangCss "text-xl text-white") [text_ "dynDiffOrdered"]
+    , dynDiffOrdered D.div empty getId render arrEv
+    , D.div (bangCss "text-xl text-white") [text_ "dynDiffUnordered"]
+    , dynDiffUnordered D.div empty getId render arrEv
+    , D.div (bangCss "text-xl text-white") [text_ "dynDiffAdditionOnly"]
+    , dynDiffOnlyAddition D.div empty render arrEv
+    ]
 
 main :: Effect Unit
-main = do
-  { event: event', push } :: EventIO (Variant (loading :: Unit, error :: Unit, done :: String)) <- create
-  runInBody1
-    (
-      memoBeh (fromEvent event') (inj (Proxy :: _ "loading") unit)
-        ( \event ->
-            loadingErrorDone_ D.div event
-              { loading: \_ -> text_ "Loading."
-              , error: \_ -> text_ "Error."
-              , done: \doc' -> do
-                  let doc = fold (flip Array.snoc) doc' []
-                  D.div_ [ text $ show <$> doc ]
-              }
-        )
-    )
-  launchAff_ do
-    liftEffect $ push ( inj (Proxy :: _ "done") "First")
-    liftEffect $ push ( inj (Proxy :: _ "done") "Second")
-    liftEffect $ push ( inj (Proxy :: _ "done") "Third")
+main = runInBody nut
